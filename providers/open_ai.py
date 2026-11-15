@@ -101,8 +101,10 @@ class BaseOpenAi(ABC):
         if model_name.startswith("o"):
             return {"reasoning_effort": "low"}
 
-        # gpt-5.x models (5.1, 5.2, etc.) support "none" as minimal
-        if model_name.startswith("gpt-5."):
+        # gpt-5.x and gpt-6.x models support "none" as minimal. gpt-6 reasons by
+        # default and the API rejects function tools on chat completions unless
+        # reasoning_effort is "none".
+        if model_name.startswith(("gpt-5.", "gpt-6")):
             return {"reasoning_effort": "none"}
 
         # gpt-5 base models support "minimal" as lowest effort
