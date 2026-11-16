@@ -252,6 +252,18 @@ class ContextBuilder:
                 "session is picked up automatically."
             )
 
+        if (
+            (config_dir_name or "").casefold() == "star citizen"
+            and self._wingman_name.casefold() == "computer"
+        ):
+            context += (
+                "\n\n# CONVERSATION STYLE\n"
+                "Speak naturally and directly. Do not address the user by name in "
+                "routine replies. Use their name only when it adds meaning, such as "
+                "an initial greeting or to clarify whom you mean. Avoid repeating "
+                "the user's name in consecutive replies."
+            )
+
         self._last_compiled_context = context
         return context
 

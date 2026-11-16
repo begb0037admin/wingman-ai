@@ -78,9 +78,10 @@ def build(
     memory=None,
     settings=None,
     config_dir_name=None,
+    wingman_name="Computer",
 ):
     builder = ContextBuilder(
-        config or make_config(), settings or make_settings(), "Computer"
+        config or make_config(), settings or make_settings(), wingman_name
     )
     return asyncio.run(
         builder.build(
@@ -113,6 +114,25 @@ def test_voice_control_help_matches_the_core_quiet_phrase_and_audio_mode():
     assert "Only the name 'Computer' wakes Core from standby" in context
     assert "microphone pauses while you speak" in context
     assert "cannot interrupt speech already playing" in context
+
+
+def test_star_citizen_computer_gets_late_natural_name_style_instruction():
+    context = build(
+        config=make_config(backstory="Backstory: Joe is the pilot."),
+        config_dir_name="Star Citizen",
+    )
+
+    assert "Do not address the user by name in routine replies" in context
+    assert context.index("Backstory: Joe is the pilot") < context.index("# CONVERSATION STYLE")
+    assert context.rstrip().endswith("consecutive replies.")
+
+
+def test_name_style_instruction_does_not_affect_atc_or_other_contexts():
+    atc = build(config_dir_name="Star Citizen", wingman_name="ATC")
+    other = build(config_dir_name="Other", wingman_name="Computer")
+
+    assert "# CONVERSATION STYLE" not in atc
+    assert "# CONVERSATION STYLE" not in other
 
 
 def test_a_prompt_with_raw_braces_still_builds():

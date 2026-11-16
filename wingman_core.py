@@ -62,6 +62,8 @@ from api.interface import (
     MicStatusResponse,
     CompanionStatusResponse,
     ComputerSoundEffectUpdateResponse,
+    ComputerSoundEffectSelectionRequest,
+    ComputerSoundEffectSelectionResponse,
     OpenRouterEndpointResult,
     DetectContextSizeRequest,
     MemorySuiteRequest,
@@ -269,6 +271,20 @@ class WingmanCore(WebSocketUser):
             path="/companion/computer/ai-effect/remove",
             endpoint=self.remove_computer_ai_effect,
             response_model=ComputerSoundEffectUpdateResponse,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["GET"],
+            path="/companion/computer/sound-effect",
+            endpoint=self.get_computer_sound_effect,
+            response_model=ComputerSoundEffectSelectionResponse,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["PUT"],
+            path="/companion/computer/sound-effect",
+            endpoint=self.set_computer_sound_effect,
+            response_model=ComputerSoundEffectSelectionResponse,
             tags=tags,
         )
         # Bundled word lists per game, switched on with a toggle and editable:
@@ -1477,15 +1493,8 @@ class WingmanCore(WebSocketUser):
                 await self._initialize_tower(config_dir_info)
         return self.get_companion_status(request)
 
-    async def remove_computer_ai_effect(
-        self, request: Request
-    ) -> ComputerSoundEffectUpdateResponse:
-        """Remove only Computer's AI voice effect, with a Core-managed backup.
-
-        This is intentionally narrower than the general Wingman config save API:
-        it accepts no config payload, only operates on Star Citizen's Computer,
-        preserves every other sound effect and config field, and never touches ATC.
-        """
+    def _computer_effect_context(self, request: Request):
+        """Load only the active Star Citizen Computer after native-client checks."""
         self._require_native_companion_request(request)
         config_dir = self.config_service.current_config_dir
         if config_dir is None or config_dir.name.casefold() != "star citizen":
@@ -1516,21 +1525,82 @@ class WingmanCore(WebSocketUser):
         except Exception as exc:
             raise HTTPException(status_code=500, detail="Computer config could not be loaded.") from exc
 
+        return config_dir, computer_file, computer_config, computer
+
+    def get_computer_sound_effect(
+        self, request: Request
+    ) -> ComputerSoundEffectSelectionResponse:
+        _, _, computer_config, _ = self._computer_effect_context(request)
+        effects = list(computer_config.sound.effects)
+        if len(effects) > 1:
+            raise HTTPException(
+                status_code=409,
+                detail="Computer has multiple effects; edit them in Wingman before using this selector.",
+            )
+        return ComputerSoundEffectSelectionResponse(
+            effect=effects[0] if effects else None,
+            available_effects=list(SoundEffect),
+        )
+
+    async def set_computer_sound_effect(
+        self, request: Request, selection: ComputerSoundEffectSelectionRequest
+    ) -> ComputerSoundEffectSelectionResponse:
+        context = self._computer_effect_context(request)
+        config_dir, computer_file, computer_config, computer = context
+        original_effects = list(computer_config.sound.effects)
+        if len(original_effects) > 1:
+            raise HTTPException(
+                status_code=409,
+                detail="Computer has multiple effects; edit them in Wingman before using this selector.",
+            )
+        target_effects = [selection.effect] if selection.effect is not None else []
+        changed, backup_file = await self._save_computer_effects(
+            config_dir, computer_file, computer_config, computer, target_effects,
+            backup_reason="sound-effect-selection",
+        )
+        return ComputerSoundEffectSelectionResponse(
+            effect=selection.effect,
+            available_effects=list(SoundEffect),
+            changed=changed,
+            backup_file=backup_file,
+        )
+
+    async def remove_computer_ai_effect(
+        self, request: Request
+    ) -> ComputerSoundEffectUpdateResponse:
+        """Remove only Computer's AI effect, preserving any other effects."""
+        config_dir, computer_file, computer_config, computer = self._computer_effect_context(request)
+
         original_effects = list(computer_config.sound.effects)
         target_effects = [effect for effect in original_effects if effect != SoundEffect.AI]
         removed_effects = [effect for effect in original_effects if effect == SoundEffect.AI]
-        if not removed_effects:
-            return ComputerSoundEffectUpdateResponse(
-                wingman_name="Computer",
-                remaining_effects=[effect.value for effect in original_effects],
-                changed=False,
-            )
+        changed, backup_file = await self._save_computer_effects(
+            config_dir, computer_file, computer_config, computer, target_effects,
+            backup_reason="ai-effect-removal",
+        )
+        return ComputerSoundEffectUpdateResponse(
+            wingman_name="Computer",
+            removed_effects=[effect.value for effect in removed_effects],
+            remaining_effects=[effect.value for effect in target_effects],
+            backup_file=backup_file,
+            changed=changed,
+        )
 
+    async def _save_computer_effects(
+        self, config_dir, computer_file, computer_config, computer,
+        target_effects: list[SoundEffect], backup_reason: str,
+    ) -> tuple[bool, Optional[str]]:
+        """Back up, persist and verify a Computer-only effect update."""
+        original_effects = list(computer_config.sound.effects)
+        if target_effects == original_effects:
+            return False, None
+
+        config_manager = self.config_service.config_manager
         config_path = os.path.join(
             config_manager.config_dir, config_dir.directory, computer_file.file
         )
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-        backup_name = f"Computer.yaml.before-ai-effect-removal-{stamp}.bak"
+        backup_name = f"Computer.yaml.before-{backup_reason}-{stamp}.bak"
         backup_path = os.path.join(os.path.dirname(config_path), backup_name)
         try:
             shutil.copy2(config_path, backup_path)
@@ -1565,13 +1635,7 @@ class WingmanCore(WebSocketUser):
                 status_code=500, detail="Computer voice effect could not be saved safely."
             ) from exc
 
-        return ComputerSoundEffectUpdateResponse(
-            wingman_name="Computer",
-            removed_effects=[effect.value for effect in removed_effects],
-            remaining_effects=[effect.value for effect in target_effects],
-            backup_file=backup_name,
-            changed=True,
-        )
+        return True, backup_name
 
     def get_mic_status(self) -> MicStatusResponse:
         """Snapshot of the current mic / voice-activation state (voice_events payload)."""

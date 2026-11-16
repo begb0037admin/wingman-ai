@@ -137,6 +137,23 @@ class ComputerSoundEffectUpdateResponse(BaseModel):
     changed: bool = False
 
 
+class ComputerSoundEffectSelectionRequest(BaseModel):
+    """One Computer voice effect, or null for the natural voice."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    effect: Optional[SoundEffect]
+
+
+class ComputerSoundEffectSelectionResponse(BaseModel):
+    """Safe, field-scoped Computer effect state for the native companion."""
+
+    effect: Optional[SoundEffect]
+    available_effects: list[SoundEffect]
+    changed: bool = False
+    backup_file: Optional[str] = None
+
+
 class MicStatusResponse(BaseModel):
     """Current microphone / voice-activation state, published as the payload of the
     AudioPlayer.voice_events "changed" event (skill facade: audio.mic_status)."""
