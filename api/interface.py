@@ -114,13 +114,37 @@ class CoreStatusResponse(BaseModel):
     """0.0–1.0 progress for operations with known duration."""
 
 
+class CompanionStatusResponse(BaseModel):
+    """Safe readiness for the local native companion, separate from Core readiness."""
+
+    core_state: str
+    config_name: Optional[str] = None
+    companion_authorized: bool = False
+    wingmen_ready: bool = False
+    loaded_wingmen: list[str] = Field(default_factory=list)
+    initialization_error_count: int = 0
+    status: str
+    """ready | core_not_ready | wrong_config | not_initialized | missing_wingmen."""
+
+
+class ComputerSoundEffectUpdateResponse(BaseModel):
+    """Safe result for the native companion's Computer-only voice-effect change."""
+
+    wingman_name: str
+    removed_effects: list[str] = Field(default_factory=list)
+    remaining_effects: list[str] = Field(default_factory=list)
+    backup_file: Optional[str] = None
+    changed: bool = False
+
+
 class MicStatusResponse(BaseModel):
     """Current microphone / voice-activation state, published as the payload of the
     AudioPlayer.voice_events "changed" event (skill facade: audio.mic_status)."""
 
     state: str
     """off | muted | armed | held | paused. The one field that says it all; the
-    booleans below are derived from it."""
+    booleans below are derived from it. In soft standby this remains armed; the
+    separate ``standby`` flag says passive transcripts are gated."""
     listening: bool
     """True when voice activation is on and the mic is not muted (nor paused for playback)."""
     muted: bool = False
@@ -128,6 +152,10 @@ class MicStatusResponse(BaseModel):
     push-to-talk key or a speaking wingman does not count."""
     voice_activation_enabled: bool
     """Whether voice activation (vs push-to-talk) is configured."""
+    activation_toggle_supported: bool = False
+    """Whether Core exposes the field-scoped activation toggle operation."""
+    standby: bool = False
+    """Soft standby: passive voice is ignored until the Computer wake name is heard."""
     playing: bool
     """True while a wingman is currently playing back audio (the mic is paused then)."""
     recording: bool
@@ -136,6 +164,22 @@ class MicStatusResponse(BaseModel):
     """Name of the wingman currently being recorded, or None when not recording."""
     recording_wingman_avatar: Optional[str] = None
     """Local file path to the recording wingman's avatar (PNG), or None when not recording."""
+
+
+class VoiceActivationEnabledRequest(BaseModel):
+    """Field-scoped request to enable or disable continuous voice activation."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    enabled: bool
+
+
+class VoiceActivationStandbyRequest(BaseModel):
+    """Field-scoped request to enter or leave soft voice standby."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    standby: bool
 
 
 class VoiceInfo(BaseModel):
@@ -602,6 +646,9 @@ class VoiceActivationSettings(BaseModel):
     enabled: bool
     """Whether to use voice activation or not. If you disable this, you need to use the record key to record your voice."""
 
+    standby: bool = False
+    """Soft standby keeps capture/STT active for the Computer wake name while discarding other passive speech."""
+
     mute_toggle_bindings: list[InputBinding]
     """Keys that switch the microphone on and off while voice activation is on,
     to talk to other people without the Wingman listening."""
@@ -629,7 +676,7 @@ class VoiceActivationSettings(BaseModel):
     speakers the microphone hears the wingman itself, and the wingman then
     answers its own words or stops itself. Off means deaf while speaking."""
 
-    stop_words: list[str] = ['stop', 'stopp', 'stop it', 'stop please', 'shut up', 'be quiet', 'silence', 'enough', 'halt', 'sei still', 'ruhe', 'schluss', 'bitte stopp', 'okay stop', 'basta', 'silencio', 'para', 'cállate', 'callate', 'arrête', 'arrete', 'tais-toi', 'assez', "stop s'il te plaît"]
+    stop_words: list[str] = ['stop', 'stopp', 'stop it', 'stop please', 'shut up', 'be quiet', 'silence', 'enough', 'halt', 'stand down', 'sei still', 'ruhe', 'schluss', 'bitte stopp', 'okay stop', 'basta', 'silencio', 'para', 'cállate', 'callate', 'arrête', 'arrete', 'tais-toi', 'assez', "stop s'il te plaît"]
     """Phrases that stop a wingman mid-sentence and are not answered. An
     utterance counts when every word in it comes from these phrases, so
     "okay stop please" works with "okay stop" and "stop please" listed."""

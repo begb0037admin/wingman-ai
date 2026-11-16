@@ -16,8 +16,14 @@ def _core():
 
 def test_default_stop_words_cover_the_ways_people_say_it():
     core = _core()
-    for text in ("Stop.", "Stopp!", "shut up", "Halt, bitte", "okay stop", "stop please"):
+    for text in ("Stop.", "Stopp!", "shut up", "Halt, bitte", "okay stop", "stop please", "stand down", "Computer, stand down", "ATC, stand down"):
         assert core._is_stop(_words(text)), text
+
+
+def test_stand_down_quiets_a_reply_without_consuming_a_new_request():
+    core = _core()
+    assert core._has_stop_word(_words("please stand down now"))
+    assert not core._is_stop(_words("Computer, what does stand down mean?"))
 
 
 def test_a_request_is_not_a_stop():

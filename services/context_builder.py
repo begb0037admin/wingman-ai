@@ -204,6 +204,26 @@ class ContextBuilder:
         ):
             context += "\n\n" + conversation_summary_section
 
+        # Core consumes voice control phrases before they reach the Wingman.
+        # Give the model accurate help text when the user asks about them.
+        context += (
+            "\n\n# VOICE CONTROLS\n"
+            "The app has a spoken standby command: 'stand down' (also 'Okay, stand down'). "
+            "Core intercepts it before you receive the transcript, stops any reply, "
+            "and enters soft standby. The microphone and local wake detection remain on, "
+            "but ordinary passive speech is ignored and you do not respond. Only the name "
+            "'Computer' wakes Core from standby: 'Computer' alone wakes and routes for an "
+            "acknowledgement; 'Computer' followed by a request wakes and routes it in the "
+            "same turn. ATC cannot wake standby. This is not a hardware microphone mute. "
+            "If asked, explain that this is an app voice control, not one of your tools; "
+            "do not claim that you can change microphone settings yourself."
+        )
+        if not self._settings.voice_activation.listen_while_speaking:
+            context += (
+                " The microphone pauses while you speak, so the quiet command "
+                "cannot interrupt speech already playing."
+            )
+
         if memory_block:
             context += "\n\n" + memory_block
 

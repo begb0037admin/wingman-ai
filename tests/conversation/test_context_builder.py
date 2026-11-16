@@ -63,7 +63,10 @@ def make_config(backstory="Backstory: a grumpy ship AI.", template=TEMPLATE):
 
 def make_settings(user_name="Commander"):
     return SimpleNamespace(
-        spoken_language=SpokenLanguage.DE, other_language=None, user_name=user_name
+        spoken_language=SpokenLanguage.DE,
+        other_language=None,
+        user_name=user_name,
+        voice_activation=SimpleNamespace(listen_while_speaking=False),
     )
 
 
@@ -99,6 +102,17 @@ def test_the_backstory_and_the_system_prompt_end_up_in_the_context():
 
     assert "SYSTEM-PROMPT-MARKER" in context
     assert "a grumpy ship AI" in context
+
+
+def test_voice_control_help_matches_the_core_quiet_phrase_and_audio_mode():
+    context = build()
+
+    assert "'stand down'" in context
+    assert "Core intercepts it" in context
+    assert "enters soft standby" in context
+    assert "Only the name 'Computer' wakes Core from standby" in context
+    assert "microphone pauses while you speak" in context
+    assert "cannot interrupt speech already playing" in context
 
 
 def test_a_prompt_with_raw_braces_still_builds():

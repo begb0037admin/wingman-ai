@@ -1,14 +1,16 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 import os
 import platform
 import re
+import shutil
 import threading
 import time
 from typing import Optional
 import pygame
 from google.genai import types
-from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Body, File, Form, HTTPException, Request, UploadFile
 import requests
 import sounddevice as sd
 from showinfm import show_in_file_manager
@@ -33,6 +35,7 @@ from api.enums import (
     SpokenLanguage,
     SttProvider,
     WingmanInitializationErrorType,
+    SoundEffect,
 )
 from api.interface import (
     ScGameLogStatus,
@@ -57,6 +60,8 @@ from api.interface import (
     MemoryEntryResponse,
     MemoryUpdateRequest,
     MicStatusResponse,
+    CompanionStatusResponse,
+    ComputerSoundEffectUpdateResponse,
     OpenRouterEndpointResult,
     DetectContextSizeRequest,
     MemorySuiteRequest,
@@ -77,6 +82,9 @@ from api.interface import (
     VocabularyPreset,
     TestConnectionResult,
     VoiceActivationSettings,
+    VoiceActivationStandbyRequest,
+    VoiceActivationEnabledRequest,
+    WingmanConfigFileInfo,
     WingmanInitializationError,
 )
 from providers.elevenlabs import ElevenLabs
@@ -197,6 +205,9 @@ class WingmanCore(WebSocketUser):
         speech_text.configure(app_root_path)
         self.system_manager = system_manager
         self.is_client_logged_in: bool = False
+        # Local native-companion authorization is distinct from account login;
+        # it grants only local Tower initialization.
+        self.is_companion_authorized: bool = False
         self.client_plan: str = "Free"
         self.client_account_name: str = ""
 
@@ -223,6 +234,41 @@ class WingmanCore(WebSocketUser):
             path="/voice-activation/status",
             endpoint=self.get_mic_status,
             response_model=MicStatusResponse,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
+            path="/voice-activation/enabled",
+            endpoint=self.update_voice_activation_enabled,
+            response_model=MicStatusResponse,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
+            path="/voice-activation/standby",
+            endpoint=self.update_voice_activation_standby,
+            response_model=MicStatusResponse,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["GET"],
+            path="/companion/status",
+            endpoint=self.get_companion_status,
+            response_model=CompanionStatusResponse,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
+            path="/companion/initialize",
+            endpoint=self.initialize_companion,
+            response_model=CompanionStatusResponse,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
+            path="/companion/computer/ai-effect/remove",
+            endpoint=self.remove_computer_ai_effect,
+            response_model=ComputerSoundEffectUpdateResponse,
             tags=tags,
         )
         # Bundled word lists per game, switched on with a toggle and editable:
@@ -1369,6 +1415,164 @@ class WingmanCore(WebSocketUser):
             progress=self.core_state_progress,
         )
 
+    @staticmethod
+    def _require_native_companion_request(request: Request) -> None:
+        """Reject browser-origin and non-loopback access to companion controls."""
+        client = request.client
+        if client is None or client.host not in ("127.0.0.1", "::1"):
+            raise HTTPException(status_code=403, detail="Local companion access only.")
+        if request.headers.get("origin"):
+            raise HTTPException(status_code=403, detail="Native companion requests only.")
+
+    def get_companion_status(self, request: Request) -> CompanionStatusResponse:
+        self._require_native_companion_request(request)
+        config_dir = self.config_service.current_config_dir
+        config_name = config_dir.name if config_dir else None
+        loaded = [wingman.name for wingman in self.tower.wingmen] if self.tower else []
+        loaded_casefolded = {name.casefold() for name in loaded}
+        correct_config = config_name is not None and config_name.casefold() == "star citizen"
+        core_ready = self.core_state == CoreState.READY
+        expected_loaded = {"computer", "atc"}.issubset(loaded_casefolded)
+        wingmen_ready = core_ready and correct_config and expected_loaded
+
+        if not core_ready:
+            status = "core_not_ready"
+        elif not correct_config:
+            status = "wrong_config"
+        elif self.tower is None:
+            status = "not_initialized"
+        elif not expected_loaded:
+            status = "missing_wingmen"
+        else:
+            status = "ready"
+
+        return CompanionStatusResponse(
+            core_state=self.core_state.value,
+            config_name=config_name,
+            companion_authorized=self.is_companion_authorized,
+            wingmen_ready=wingmen_ready,
+            loaded_wingmen=loaded,
+            initialization_error_count=len(self.tower_errors),
+            status=status,
+        )
+
+    async def initialize_companion(self, request: Request) -> CompanionStatusResponse:
+        """Initialize the selected Star Citizen Tower for the native local Hub."""
+        self._require_native_companion_request(request)
+        status = self.get_companion_status(request)
+        if status.wingmen_ready or status.status != "not_initialized":
+            return status
+
+        config = self.config_service.current_config
+        config_dir = self.config_service.current_config_dir
+        if config is None or config_dir is None:
+            raise HTTPException(status_code=409, detail="Core configuration is not loaded.")
+
+        config_dir_info = ConfigWithDirInfo(config=config, config_dir=config_dir)
+        async with self._tower_lock:
+            # Another local initialization request can complete while waiting
+            # for the lock. Keep this operation idempotent in that case.
+            if self.tower is None:
+                self.is_companion_authorized = True
+                await self._initialize_tower(config_dir_info)
+        return self.get_companion_status(request)
+
+    async def remove_computer_ai_effect(
+        self, request: Request
+    ) -> ComputerSoundEffectUpdateResponse:
+        """Remove only Computer's AI voice effect, with a Core-managed backup.
+
+        This is intentionally narrower than the general Wingman config save API:
+        it accepts no config payload, only operates on Star Citizen's Computer,
+        preserves every other sound effect and config field, and never touches ATC.
+        """
+        self._require_native_companion_request(request)
+        config_dir = self.config_service.current_config_dir
+        if config_dir is None or config_dir.name.casefold() != "star citizen":
+            raise HTTPException(
+                status_code=409, detail="Star Citizen Computer is not the active config."
+            )
+        if self.tower is None:
+            raise HTTPException(status_code=409, detail="Star Citizen Computer is not loaded.")
+
+        config_manager = self.config_service.config_manager
+        computer = self.tower.get_wingman_by_name("Computer")
+        if computer is None:
+            raise HTTPException(status_code=409, detail="Star Citizen Computer is not loaded.")
+
+        computer_file = next(
+            (
+                item
+                for item in config_manager.get_wingmen_configs(config_dir)
+                if item.name.casefold() == "computer"
+            ),
+            None,
+        )
+        if computer_file is None:
+            raise HTTPException(status_code=404, detail="Computer config was not found.")
+
+        try:
+            computer_config = config_manager.load_wingman_config(config_dir, computer_file)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail="Computer config could not be loaded.") from exc
+
+        original_effects = list(computer_config.sound.effects)
+        target_effects = [effect for effect in original_effects if effect != SoundEffect.AI]
+        removed_effects = [effect for effect in original_effects if effect == SoundEffect.AI]
+        if not removed_effects:
+            return ComputerSoundEffectUpdateResponse(
+                wingman_name="Computer",
+                remaining_effects=[effect.value for effect in original_effects],
+                changed=False,
+            )
+
+        config_path = os.path.join(
+            config_manager.config_dir, config_dir.directory, computer_file.file
+        )
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        backup_name = f"Computer.yaml.before-ai-effect-removal-{stamp}.bak"
+        backup_path = os.path.join(os.path.dirname(config_path), backup_name)
+        try:
+            shutil.copy2(config_path, backup_path)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail="Computer config backup failed.") from exc
+
+        computer_config.sound.effects = target_effects
+        try:
+            saved = await self.config_service.save_wingman_config(
+                config_dir=config_dir,
+                wingman_file=computer_file,
+                wingman_config=computer_config,
+                silent=True,
+            )
+            persisted_config = config_manager.load_wingman_config(config_dir, computer_file)
+            persisted_effects = list(persisted_config.sound.effects)
+            if not saved or persisted_effects != target_effects:
+                raise RuntimeError("Computer effect change was not confirmed on disk.")
+        except Exception as exc:
+            # ConfigService updates the loaded Wingman before it writes. Restore
+            # the exact original file and runtime config if persistence failed.
+            try:
+                shutil.copy2(backup_path, config_path)
+                computer_config.sound.effects = original_effects
+                await computer.update_config(config=computer_config)
+            except Exception:
+                self.printr.print(
+                    "Computer voice-effect rollback failed; inspect Core startup logs.",
+                    server_only=True,
+                )
+            raise HTTPException(
+                status_code=500, detail="Computer voice effect could not be saved safely."
+            ) from exc
+
+        return ComputerSoundEffectUpdateResponse(
+            wingman_name="Computer",
+            removed_effects=[effect.value for effect in removed_effects],
+            remaining_effects=[effect.value for effect in target_effects],
+            backup_file=backup_name,
+            changed=True,
+        )
+
     def get_mic_status(self) -> MicStatusResponse:
         """Snapshot of the current mic / voice-activation state (voice_events payload)."""
         state = self.listen_controller.state
@@ -1392,11 +1596,64 @@ class WingmanCore(WebSocketUser):
             voice_activation_enabled=bool(
                 self.settings_service.settings.voice_activation.enabled
             ),
+            activation_toggle_supported=True,
+            standby=bool(self.settings_service.settings.voice_activation.standby),
             playing=bool(self.audio_player.is_playing),
             recording=state == ListenState.HELD,
             recording_wingman=rec_name,
             recording_wingman_avatar=rec_avatar,
         )
+
+    async def update_voice_activation_enabled(
+        self, request: VoiceActivationEnabledRequest
+    ) -> MicStatusResponse:
+        """Change only the hands-free enabled flag, persist it, and return safe status."""
+        voice_settings = self.settings_service.settings.voice_activation
+        previous = voice_settings.enabled
+        if previous == request.enabled:
+            return self.get_mic_status()
+
+        voice_settings.enabled = request.enabled
+        try:
+            await self.settings_service.settings_events.publish(
+                "voice_activation_changed", request.enabled
+            )
+            if not self.settings_service.save_settings_to_disk():
+                raise OSError("Core could not persist the voice activation setting.")
+        except Exception as error:
+            voice_settings.enabled = previous
+            try:
+                await self.settings_service.settings_events.publish(
+                    "voice_activation_changed", previous
+                )
+            except Exception as rollback_error:
+                error.add_note(f"Voice activation event rollback failed: {rollback_error}")
+            try:
+                if not self.settings_service.save_settings_to_disk():
+                    raise OSError("Core could not persist the restored voice activation setting.")
+            except Exception as rollback_error:
+                error.add_note(f"Voice activation persistence rollback failed: {rollback_error}")
+            raise
+        return self.get_mic_status()
+
+    async def update_voice_activation_standby(
+        self, request: VoiceActivationStandbyRequest
+    ) -> MicStatusResponse:
+        """Persist only soft standby; it does not mute or stop microphone capture."""
+        va = self.settings_service.settings.voice_activation
+        previous = va.standby
+        if previous == request.standby:
+            return self.get_mic_status()
+
+        va.standby = request.standby
+        try:
+            if not self.settings_service.save_settings_to_disk():
+                raise OSError("Core could not persist voice standby.")
+        except Exception:
+            va.standby = previous
+            raise
+        self._emit_voice_state()
+        return self.get_mic_status()
 
     def _run_on_main_loop(self, coro) -> None:
         """Schedule a coroutine on the main loop from any thread. The WebSocket
@@ -1673,12 +1930,12 @@ class WingmanCore(WebSocketUser):
             await self._initialize_tower(config_dir_info)
 
     async def _initialize_tower(self, config_dir_info: ConfigWithDirInfo):
-        if not self.is_client_logged_in:
+        if not self.is_client_logged_in and not self.is_companion_authorized:
             # The config shown is another one now. The old Tower must not
             # keep answering until the user signs in again.
             await self.unload_tower()
             self.printr.print(
-                "Client not logged in yet - skipping Tower initialization.",
+                "No logged-in client or authorized local companion - skipping Tower initialization.",
                 color=LogType.WARNING,
                 server_only=True,
             )
@@ -2077,6 +2334,51 @@ class WingmanCore(WebSocketUser):
         # Those are taken out first; the decisions below are about the rest.
         hits = self._echo_hits(words) if during_playback else [False] * len(words)
         own = [w for w, hit in zip(words, hits) if not hit]
+        va = self.settings_service.settings.voice_activation
+        passive_voice = wingman is None
+        if passive_voice and self._is_standby_command(own):
+            va.standby = True
+            try:
+                persisted = self.settings_service.save_settings_to_disk()
+            except Exception:
+                persisted = False
+            if not persisted:
+                self.printr.print(
+                    "Could not persist voice standby.",
+                    server_only=True,
+                    color=LogType.WARNING,
+                )
+            if playing:
+                self._run_on_main_loop(self.stop_playback())
+            self.printr.print(
+                "Voice standby enabled; waiting for Computer.",
+                server_only=True,
+                color=LogType.INFO,
+            )
+            self._emit_voice_state()
+            return
+        if passive_voice and va.standby:
+            target = self.tower.get_addressed_wingman(text)
+            computer = next(
+                (w for w in self.tower.wingmen if w.config.name.casefold() == "computer"),
+                None,
+            )
+            if target is not computer or computer is None:
+                return
+            va.standby = False
+            try:
+                persisted = self.settings_service.save_settings_to_disk()
+            except Exception:
+                persisted = False
+            if not persisted:
+                # Wake conservatively in memory; tell the operator that the
+                # state will not survive a restart rather than dropping a valid request.
+                self.printr.print(
+                    "Voice standby cleared but could not be persisted.",
+                    server_only=True,
+                    color=LogType.WARNING,
+                )
+            self._emit_voice_state()
         if self._is_stop(own) or (during_playback and self._has_stop_word(own)):
             # Over the wingman, a stop word anywhere in what the user said
             # is a stop; the rest of it was talking over an answer they did
@@ -2197,6 +2499,14 @@ class WingmanCore(WebSocketUser):
         """
         if not words:
             return False
+        # Kevin's quiet phrase remains available even with an older settings.yaml
+        # whose stop_words list predates this fork's default.
+        if tuple(words) in {
+            ("stand", "down"),
+            ("computer", "stand", "down"),
+            ("atc", "stand", "down"),
+        }:
+            return True
         phrases = [
             tuple(_words(phrase))
             for phrase in self.settings_service.settings.voice_activation.stop_words
@@ -2210,12 +2520,29 @@ class WingmanCore(WebSocketUser):
         every_word = {word for phrase in phrases for word in phrase}
         return all(word in every_word for word in words)
 
+    @staticmethod
+    def _is_standby_command(words: list[str]) -> bool:
+        """Only explicit whole-utterance commands enter standby."""
+        return tuple(words) in {
+            ("stand", "down"),
+            ("okay", "stand", "down"),
+            ("please", "stand", "down"),
+            ("computer", "stand", "down"),
+            ("okay", "computer", "stand", "down"),
+            ("please", "computer", "stand", "down"),
+            ("atc", "stand", "down"),
+            ("okay", "atc", "stand", "down"),
+            ("please", "atc", "stand", "down"),
+        }
+
     def _has_stop_word(self, words: list[str]) -> bool:
         """Whether a stop word stands anywhere in the words. Used for what the
         user said over the wingman: "stop" between misheard echo words and
         their own protest still means stop."""
         if not words:
             return False
+        if any(words[index : index + 2] == ["stand", "down"] for index in range(len(words) - 1)):
+            return True
         phrases = [
             tuple(_words(phrase))
             for phrase in self.settings_service.settings.voice_activation.stop_words

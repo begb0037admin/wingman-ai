@@ -189,6 +189,9 @@ class SettingsService:
     # POST /settings
     async def save_settings(self, settings: SettingsConfig):
         old = deepcopy(self.config_manager.settings_config)
+        # Standby changes through the scoped Core operation or passive voice
+        # wake/standby handling. Preserve it across older full-settings clients.
+        settings.voice_activation.standby = old.voice_activation.standby
         await self._give_recorded_bindings_one_owner(settings, old)
 
         # Speech-to-text. One block for every wingman and both ways of talking.
@@ -420,9 +423,9 @@ class SettingsService:
             if lost:
                 announce(settings_owner(slot), lost)
 
-    def save_settings_to_disk(self):
+    def save_settings_to_disk(self) -> bool:
         """Persist current settings to disk without triggering provider updates."""
-        self.config_manager.save_settings_config()
+        return bool(self.config_manager.save_settings_config())
 
     async def set_audio_devices(
         self, input_device: Optional[int] = None, output_device: Optional[int] = None

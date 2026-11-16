@@ -81,6 +81,18 @@ def test_the_decision_model_toggle_actually_reaches_the_config():
     assert current.decision_model.enabled is False
 
 
+def test_an_older_settings_payload_cannot_clear_voice_standby():
+    """The scoped standby operation remains authoritative over broad settings saves."""
+    current = _settings()
+    current.voice_activation.standby = True
+    incoming = _settings()
+    incoming.voice_activation.standby = False
+
+    asyncio.run(_service(current).save_settings(incoming))
+
+    assert current.voice_activation.standby is True
+
+
 def test_a_language_change_before_sign_in_reloads_the_config(monkeypatch):
     """The client sets the language before it signs in, while there is no
     Tower yet. The Tower then started from the config parsed at boot, still on
