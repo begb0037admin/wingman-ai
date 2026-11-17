@@ -1,5 +1,11 @@
 # Wingman AI Core — Agent Guide
 
+## Kevin's Star Citizen workflow — fixed project rule (17 Nov 2026)
+
+Kevin uses the **Wingman AI desktop UI with this Wingman Core fork**. In this project, “SC” means Star Citizen and its Corps (for example, UEX Corp), represented through Wingman/Core skills and Wingmen. **Do not launch, use, or modify SC Companion Hub as the Star Citizen app or UI.** Its repository may contain prior experimental work; preserve it, but do not treat it as the active app. For Companion workflow changes, work in Wingman UI/Core only.
+
+For UEX voice routing, Computer is the general-purpose Wingman and UEXC is the UEXCorp specialist, activated by saying **“UEX.”** Keep the UEXCorp skill on UEXC and off Computer. Computer should pass the user's original UEX request to UEXC; follow-up turns stay with UEXC until the user names another Wingman. Do not redirect this workflow into a separate SC Companion app.
+
 ## Pull requests
 
 When work is approved, open a PR in both repos (Core and the closed-source Client). Drop the worktree of a repo you did not change. Link a GitHub issue in Core if there is one (`Closes #123`).

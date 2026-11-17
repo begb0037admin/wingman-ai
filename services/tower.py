@@ -42,6 +42,10 @@ class Tower:
         self.config_manager = config_manager
         self.wingmen: list[Wingman] = []
         self.disabled_wingmen: list[WingmanConfig] = []
+        # Passive listening follows a handoff until the user addresses another
+        # Wingman by name. This keeps the spoken conversation in the receiving
+        # Wingman's channel after the first forwarded request.
+        self._voice_handoff_target_name: str | None = None
         self.log_source_name = "Tower"
         self.xvasynth = xvasynth
         self.pocket_tts = pocket_tts
@@ -179,8 +183,28 @@ class Tower:
         return wingman
 
     def get_wingman_from_text(self, text: str) -> Wingman | None:
-        """The wingman addressed in the text, else the default one."""
-        return self.get_addressed_wingman(text) or self.get_default_wingman()
+        """Resolve passive voice to an addressed, handed-off, or default Wingman."""
+        addressed = self.get_addressed_wingman(text)
+        if addressed is not None:
+            # Saying a Wingman's name switches the active voice conversation
+            # back to that Wingman, including after a previous handoff.
+            self._voice_handoff_target_name = addressed.name
+            return addressed
+
+        if self._voice_handoff_target_name:
+            target = self.get_wingman_by_name(self._voice_handoff_target_name)
+            if target is not None:
+                return target
+            self._voice_handoff_target_name = None
+
+        return self.get_default_wingman()
+
+    def set_voice_handoff_target(self, wingman_name: str) -> bool:
+        """Keep subsequent unaddressed passive speech with the recipient."""
+        if self.get_wingman_by_name(wingman_name) is None:
+            return False
+        self._voice_handoff_target_name = wingman_name
+        return True
 
     def get_addressed_wingman(self, text: str) -> Wingman | None:
         """The wingman named in the text.
@@ -193,9 +217,13 @@ class Tower:
         words = words_of(text)
         best: tuple[int, Wingman | None] = (10**6, None)
         for wingman in self.wingmen:
-            found = find_name(words, wingman.config.name)
-            if found is not None and found[2] < best[0]:
-                best = (found[2], wingman)
+            activation_names = [wingman.config.name]
+            if wingman.config.name.casefold() == "uexc":
+                activation_names.append("UEX")
+            for activation_name in activation_names:
+                found = find_name(words, activation_name)
+                if found is not None and found[2] < best[0]:
+                    best = (found[2], wingman)
         return best[1]
 
     def get_default_wingman(self) -> Wingman | None:

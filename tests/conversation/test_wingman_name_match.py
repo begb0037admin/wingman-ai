@@ -8,8 +8,12 @@ from services.tower import Tower
 
 def tower_with(*names, default=None):
     tower = Tower.__new__(Tower)
+    tower._voice_handoff_target_name = None
     tower.wingmen = [
-        SimpleNamespace(config=SimpleNamespace(name=name, is_voice_activation_default=(name == default)))
+        SimpleNamespace(
+            name=name,
+            config=SimpleNamespace(name=name, is_voice_activation_default=(name == default)),
+        )
         for name in names
     ]
     return tower
@@ -47,6 +51,24 @@ def test_multi_word_names():
 def test_default_wingman_answers_when_nobody_is_named():
     tower = tower_with("Computer", "Ava", default="Ava")
     assert name_of(tower.get_wingman_from_text("what time is it")) == "Ava"
+
+
+def test_uex_is_an_activation_name_and_keeps_followups_with_uexc():
+    tower = tower_with("Computer", "UEXC", default="Computer")
+
+    assert name_of(tower.get_wingman_from_text("UEX, find a trade route")) == "UEXC"
+    assert name_of(tower.get_wingman_from_text("Which stop has the best price?")) == "UEXC"
+    assert name_of(tower.get_wingman_from_text("Computer, what time is it?")) == "Computer"
+
+
+def test_uex_activation_name_late_in_sentence_does_not_change_wingman():
+    tower = tower_with("Computer", "UEXC", default="Computer")
+
+    assert name_of(
+        tower.get_wingman_from_text(
+            "I checked this at the end of the long systems test, where UEXC was ready"
+        )
+    ) == "Computer"
 
 
 def test_a_common_word_is_not_a_misheard_short_name():

@@ -70,6 +70,12 @@ from services.conversation_condenser import ConversationCondenser
 from services.context_builder import ContextBuilder
 from services.command_executor import CommandExecutor
 from services.tool_executor import ToolExecutor
+from services.uex_handoff import (
+    UEX_HANDOFF_COMPLETED,
+    UEX_HANDOFF_TOOL,
+    UEX_HANDOFF_TOOL_NAME,
+    is_uex_request,
+)
 from services.provider_factory import ProviderFactory
 from services.skill_registry import SkillRegistry
 from services.threading_utils import threaded_execution
@@ -162,6 +168,7 @@ class Wingman:
         self.config = config
         self.settings = settings
         self.name = name
+        self._background_tasks: set[asyncio.Task] = set()
         self.audio_player = audio_player
         self.audio_library = audio_library
         self.tower = tower
@@ -653,6 +660,11 @@ class Wingman:
 
                 actual_response = instant_response or process_result
 
+                # The handoff tool already ran the request in UEXC's own
+                # conversation. Do not create a second Computer reply.
+                if actual_response == UEX_HANDOFF_COMPLETED:
+                    actual_response = None
+
                 if self._unloaded:
                     # The config was switched while the model answered: the
                     # answer belongs to a wingman the user left.
@@ -704,6 +716,16 @@ class Wingman:
             return instant_response, instant_response, None, True
         benchmark.finish_snapshot()
 
+        # Star Citizen UEX and trade-market requests are a deterministic
+        # department handoff: do not spend a Computer model turn deciding
+        # whether its specialist should handle them.
+        if self.name.casefold() == "computer" and is_uex_request(transcript):
+            success, handoff_message = await self._transfer_request_to_uex(transcript)
+            if success:
+                return None, UEX_HANDOFF_COMPLETED, None, True
+            await self.conversation.add_assistant_message(handoff_message)
+            return handoff_message, handoff_message, None, True
+
         # The same shape as instant activation above, one step less exact: the
         # phrase list matches words, this matches meaning. A command with a
         # written response ends the turn here without a main-model call at all;
@@ -748,7 +770,16 @@ class Wingman:
         interrupt = True
 
         while tool_calls:
-            if is_waiting_response_needed and response_message.content:
+            is_uex_handoff = any(
+                getattr(getattr(call, "function", None), "name", None)
+                == UEX_HANDOFF_TOOL_NAME
+                for call in tool_calls
+            )
+            if (
+                is_waiting_response_needed
+                and response_message.content
+                and not is_uex_handoff
+            ):
                 if self._stop_turn_filler():
                     interrupt = False
                 message = response_message.content
@@ -772,7 +803,7 @@ class Wingman:
 
             tool_start = time.perf_counter()
             instant_response, skill, iteration_timings = await self._handle_tool_calls(
-                tool_calls
+                tool_calls, original_transcript=transcript
             )
             tool_execution_time_ms += (time.perf_counter() - tool_start) * 1000
             tool_timings.extend(iteration_timings)
@@ -1068,7 +1099,7 @@ class Wingman:
 
     # ───────────────── Tool calls ───────────────── #
 
-    async def _handle_tool_calls(self, tool_calls):
+    async def _handle_tool_calls(self, tool_calls, original_transcript: str = ""):
         return await self.tool_executor.handle_tool_calls(
             tool_calls,
             tool_skills=self.tool_skills,
@@ -1083,6 +1114,8 @@ class Wingman:
             update_tool_response_fn=self.conversation.update_tool_response,
             add_tool_response_fn=self.conversation.add_tool_response,
             pending_tool_calls=self.conversation.pending_tool_calls,
+            original_transcript=original_transcript,
+            handoff_to_uex_fn=self._transfer_request_to_uex,
         )
 
     async def _start_filler(self, transcript: str, tool_calls) -> FillerLine | None:
@@ -1491,6 +1524,12 @@ class Wingman:
         for _, tool in self.mcp_registry.get_active_tools():
             tools.append(tool)
 
+        # UEXCorp has one shared owner because its data, active route and HUD
+        # are process-wide. Offer Computer a relay tool only when the dedicated
+        # UEXC Wingman is present and owns UEXCorp.
+        if self.name.casefold() == "computer" and self._uex_handoff_target():
+            tools.append(UEX_HANDOFF_TOOL)
+
         if self.persistent_memory_service:
             tools.extend(self.persistent_memory_service.get_tool_definitions())
 
@@ -1501,6 +1540,61 @@ class Wingman:
             tools.extend(HUD_TOOLS)
 
         return unique_tools(tools)
+
+    def _uex_handoff_target(self):
+        """Return the configured UEXCorp owner destination, if one is loaded."""
+        if not self.tower:
+            return None
+        target = self.tower.get_wingman_by_name("UEXC")
+        if target is None or target is self or target._unloaded:
+            return None
+        if "UEXCorp" not in (target.config.discoverable_skills or []) or not any(
+            skill.name == "UEXCorp" for skill in target.skills
+        ):
+            return None
+        return target
+
+    async def _transfer_request_to_uex(self, transcript: str) -> tuple[bool, str]:
+        """Forward the exact request to UEXC and keep subsequent voice there."""
+        target = self._uex_handoff_target()
+        if target is None:
+            return False, "UEX is unavailable; no handoff was made."
+
+        # The activation word selects Computer; it is not part of the request
+        # the UEX specialist should receive.
+        forwarded = re.sub(
+            r"^\s*computer\b[\s,:-]*", "", transcript, count=1, flags=re.IGNORECASE
+        ).strip()
+        if not forwarded:
+            return False, "There is no request to forward to UEX."
+        if not self.tower.set_voice_handoff_target(target.name):
+            return False, "UEX is no longer available; no handoff was made."
+
+        await printr.print_async(
+            "Computer is transferring this request to UEX.",
+            color=LogType.INFO,
+            source=LogSource.SYSTEM,
+            source_name="Computer → UEX",
+            wingman_name=self.name,
+        )
+        announcement = "Passing this to UEX."
+        await self.conversation.add_assistant_message(announcement)
+        await printr.print_async(
+            announcement,
+            color=LogType.POSITIVE,
+            source=LogSource.WINGMAN,
+            source_name=self.name,
+            wingman_name=self.name,
+        )
+        await self.play_to_user(announcement, no_interrupt=True)
+
+        # The source turn must finish after the spoken announcement, rather
+        # than displaying a perpetual loading state while UEXC works. Retain
+        # the task until the specialist finishes answering in its own channel.
+        task = asyncio.create_task(target.process(transcript=forwarded))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return True, "The request was forwarded to UEX."
 
     async def _show_on_hud(self, role: str, content, tool_calls) -> None:
         await HudService().on_conversation_message(self, role, content, tool_calls)

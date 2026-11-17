@@ -11,6 +11,7 @@ from services.persistent_memory import MEMORY_TOOL_NAMES
 from services.printr import Printr
 from services.tool_response_limiter import ToolResponseLimiter
 from services.context_budget import DEFAULT_WINDOW, ContextBudget
+from services.uex_handoff import UEX_HANDOFF_COMPLETED, UEX_HANDOFF_TOOL_NAME
 
 if TYPE_CHECKING:
     from api.interface import CommandConfig, WingmanConfig, SettingsConfig
@@ -122,6 +123,8 @@ class ToolExecutor:
         update_tool_response_fn: Callable[[str, str], Awaitable[bool]],
         add_tool_response_fn: Callable,
         pending_tool_calls: list,
+        original_transcript: str = "",
+        handoff_to_uex_fn: Callable[[str], Awaitable[tuple[bool, str]]] | None = None,
     ):
         """Processes all the tool calls identified in the response message.
 
@@ -150,6 +153,30 @@ class ToolExecutor:
         tool_timings: list[tuple[str, float]] = []
 
         skill = None
+
+        # A handoff is a complete turn boundary. If the model mistakenly
+        # combines it with another tool call, only perform the handoff so the
+        # source Wingman cannot continue acting after control has moved.
+        if any(
+            getattr(getattr(call, "function", None), "name", None)
+            == UEX_HANDOFF_TOOL_NAME
+            for call in tool_calls or []
+        ):
+            handoff_call = next(
+                call
+                for call in tool_calls
+                if getattr(getattr(call, "function", None), "name", None)
+                == UEX_HANDOFF_TOOL_NAME
+            )
+            for skipped_call in tool_calls:
+                if skipped_call is handoff_call:
+                    continue
+                if skipped_call.id:
+                    add_tool_response_fn(
+                        skipped_call,
+                        "Not run because the user was transferred to UEX.",
+                    )
+            tool_calls = [handoff_call]
 
         for tool_call in tool_calls:
             try:
@@ -181,6 +208,8 @@ class ToolExecutor:
                     get_command_fn=get_command_fn,
                     execute_command_fn=execute_command_fn,
                     play_to_user_fn=play_to_user_fn,
+                    original_transcript=original_transcript,
+                    handoff_to_uex_fn=handoff_to_uex_fn,
                 )
                 tool_time_ms = (time.perf_counter() - tool_start) * 1000
 
@@ -207,6 +236,9 @@ class ToolExecutor:
                 else:
                     # adding a new tool response
                     add_tool_response_fn(tool_call, function_response)
+
+                if instant_response == UEX_HANDOFF_COMPLETED:
+                    return instant_response, skill, tool_timings
             except Exception as e:
                 if tool_call.id:
                     await update_tool_response_fn(tool_call.id, "Error")
@@ -238,6 +270,8 @@ class ToolExecutor:
         execute_command_fn: Callable[["CommandConfig", bool], Awaitable[tuple]],
         play_to_user_fn: Callable[[str], Awaitable[None]],
         settings_service=None,
+        original_transcript: str = "",
+        handoff_to_uex_fn: Callable[[str], Awaitable[tuple[bool, str]]] | None = None,
     ) -> tuple[str, str | None, "Skill | None", str | None]:
         """Dispatches a single function call to the appropriate handler.
 
@@ -270,6 +304,14 @@ class ToolExecutor:
         instant_response = ""
         used_skill = None
         tool_label = None
+
+        if function_name == UEX_HANDOFF_TOOL_NAME:
+            if handoff_to_uex_fn is None:
+                return "UEX handoff is unavailable.", None, None, None
+            success, function_response = await handoff_to_uex_fn(original_transcript)
+            if success:
+                return function_response, UEX_HANDOFF_COMPLETED, None, "UEX handoff"
+            return function_response, None, None, None
 
         # ── 0. Speech vocabulary tools ──────────────────────────────
         if function_name in ("vocabulary_remember", "vocabulary_forget") and settings_service:
