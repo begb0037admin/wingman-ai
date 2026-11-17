@@ -1,6 +1,14 @@
 # Wingman Core fork — SC Companion handover
 
-Updated: 2026-11-16 (Europe/London). This is the `feature/voice-activation-enable` worktree at `C:\Users\admin\github\wingman-ai-voice-activation`, based on `fix/gpt-6-reasoning-none` commit `b77aa7b2bad373370f6e2389b0cff5ce97151765`. The sound selector and conversation style change are in Core commit `ba729630`; Hub selector is in `8001d97`.
+## UEX route images and full-size link: live-verified (17 Nov 2026)
+- Added a UEX route-card renderer and wired it to the existing Core chat image attachment path used by Vision AI. Route searches and active-run updates post to the Wingman that owns the UEXCorp skill.
+- The card shows estimated profit, capital, data age, ordered stops and actions, plus buy/sell unit prices, cargo and estimated profit. The route graphic is a stop-order schematic; UEX market values remain estimates.
+- Added an **Open full size** chat link. Core stores a full-resolution 1280x960 JPEG under the UEX state folder and serves it through a loopback-only UUID route-card endpoint; clicking the link opens it in Chrome.
+- Live-verified on 17 Nov: restarted Core from `feature/voice-activation-enable`, reconnected Wingman, asked UEXC for a Cutlass Black route from Area 18, observed `uex_get_vehicle_information` and `uex_get_trade_routes`, saw the route image and link in UEXC chat, and opened the image at `http://127.0.0.1:49111/uex-route-card/<id>` in Chrome. The displayed card was 1280x960. No test suite was run; `py_compile`, UEX skill import, Core startup, and `git diff --check` succeeded.
+- **Exact next action:** commit and push this reviewed feature-branch checkpoint with Kevin's approval. Afterward, wait for Kevin's direction before starting the next feature. Do not merge.
+
+
+Updated: 2026-11-17 (Europe/London). This is the `feature/voice-activation-enable` worktree at `C:\Users\admin\github\wingman-ai-voice-activation`, based on `fix/gpt-6-reasoning-none` commit `b77aa7b2bad373370f6e2389b0cff5ce97151765`. The sound selector and conversation style change are in Core commit `ba729630`; Hub selector is in `8001d97`.
 
 ## Implemented and live
 

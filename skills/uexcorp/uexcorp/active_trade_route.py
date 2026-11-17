@@ -122,6 +122,14 @@ class ActiveTradeRoute:
     def last_route_count(self) -> int:
         return len(self.__load().get("last_routes", []))
 
+    def last_route(self, route_number: int = 1) -> dict | None:
+        """Return one route from the most recent search, if it is still available."""
+        routes = self.__load().get("last_routes", [])
+        if not isinstance(routes, list) or not 1 <= route_number <= len(routes):
+            return None
+        route = routes[route_number - 1]
+        return route if isinstance(route, dict) else None
+
     def set(self, route_number: int) -> bool:
         with _lock:
             state = self.__load()

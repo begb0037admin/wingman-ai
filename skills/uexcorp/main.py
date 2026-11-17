@@ -1,12 +1,16 @@
 import asyncio
+import os
 import time
 import uuid
+from pathlib import Path
 
 from services.benchmark import Benchmark
 
 from typing import TYPE_CHECKING
+from api.enums import LogSource, LogType
 from api.interface import SettingsConfig, SkillConfig, WingmanInitializationError
 from skills.skill_base import Skill
+from skills.uexcorp.uexcorp.route_card import render_route_card
 from skills.uexcorp.uexcorp.helper import Helper
 
 if TYPE_CHECKING:
@@ -157,7 +161,57 @@ class UEXCorp(Skill):
             await self.__helper.get_handler_tool().execute_tool(tool_name, parameters)
         )
         benchmark.finish_snapshot()
+        await self.__send_route_card(tool_name, parameters)
         return function_response, instant_response
+
+    async def __send_route_card(self, tool_name: str, parameters: dict) -> None:
+        """Attach the UEX route map to the same Wingman chat as the tool result."""
+        try:
+            from skills.uexcorp.uexcorp.active_trade_route import ActiveTradeRoute
+
+            store = ActiveTradeRoute(self.__helper)
+            route = None
+            step = None
+            if tool_name == "uex_get_trade_routes":
+                route = await asyncio.to_thread(store.last_route, 1)
+            elif tool_name == "uex_active_trade_route":
+                action = parameters.get("action")
+                if action in {
+                    "set", "get", "next", "record_buy", "record_sell", "undo_buy", "undo_sell",
+                    "add_buy", "add_sell",
+                }:
+                    active = await asyncio.to_thread(store.get)
+                    if active:
+                        route = active.get("route")
+                        step = active.get("step")
+            if not route:
+                return
+
+            from skills.uexcorp.uexcorp.model.import_data import ImportData
+
+            imported_at = ImportData("relay_short", load=True).get_date_imported()
+            data_age_seconds = int(time.time() - imported_at) if imported_at else None
+            route_id = uuid.uuid4().hex
+            route_dir = Path(self.__helper.get_state_path()) / "route_cards"
+            route_dir.mkdir(parents=True, exist_ok=True)
+            image_path = route_dir / f"{route_id}.jpg"
+            image = await asyncio.to_thread(
+                render_route_card, route, step, data_age_seconds, str(image_path)
+            )
+            port = int(os.environ.get("WINGMAN_CORE_PORT", "49111"))
+            full_size_url = f"http://127.0.0.1:{port}/uex-route-card/{route_id}"
+            await self.printr.print_async(
+                f"UEX trade route - [Open full size]({full_size_url})",
+                color=LogType.INFO,
+                source=LogSource.WINGMAN,
+                source_name=self.wingman.name,
+                skill_name=self.name,
+                additional_data={"image_base64": image},
+                wingman_name=self.wingman.name,
+            )
+        except Exception as e:
+            # The text tool response remains usable if the visual card fails.
+            self.log.warning(f"Could not attach UEX route map to chat: {e}", exc_info=True)
 
     async def is_waiting_response_needed(self, tool_name: str) -> bool:
         return True

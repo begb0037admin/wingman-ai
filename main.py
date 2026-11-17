@@ -124,7 +124,7 @@ from services.connection_manager import ConnectionManager
 from services.esp32_handler import Esp32Handler
 from services import error_reporting
 from services.avatar_studio import variant_file
-from services.file import get_generated_images_dir
+from services.file import get_generated_images_dir, get_users_dir
 from services.secret_keeper import SecretKeeper
 from services.printr import Printr
 from services.websocket_user import WebSocketUser
@@ -563,6 +563,23 @@ async def shutdown_and_exit(request: Request):
         _exit_task = asyncio.create_task(_shutdown_then_exit())
 
 
+@app.get("/uex-route-card/{route_id}", tags=["main"], include_in_schema=False)
+async def open_uex_route_card(route_id: str, request: Request):
+    """Open a locally generated full-resolution UEX route card in the browser."""
+    if request.client is None or request.client.host not in ("127.0.0.1", "::1"):
+        raise HTTPException(status_code=403)
+    if len(route_id) != 32 or any(char not in "0123456789abcdef" for char in route_id):
+        raise HTTPException(status_code=404)
+    image_path = path.join(get_users_dir(), "uexcorp", "route_cards", f"{route_id}.jpg")
+    if not path.isfile(image_path):
+        raise HTTPException(status_code=404)
+    return FileResponse(
+        image_path,
+        media_type="image/jpeg",
+        headers={"Content-Disposition": 'inline; filename="UEX-route.jpg"', "Cache-Control": "no-store"},
+    )
+
+
 @app.get("/ping", tags=["main"], response_model=CoreStatusResponse)
 async def ping():
     return core.get_status()
@@ -701,6 +718,7 @@ async def get_dummy_benchmark():
 
 
 async def async_main(host: str, port: int, sidecar: bool):
+    os.environ["WINGMAN_CORE_PORT"] = str(port)
     # The OAuth redirect URI points at this process, so the service cannot know
     # it until the port is known. Do it before uvicorn binds: a user cannot reach
     # the settings UI before the server is up, but the redirect URI is read the
