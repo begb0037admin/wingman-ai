@@ -7,6 +7,12 @@
 - Live-verified on 17 Nov: restarted Core from `feature/voice-activation-enable`, reconnected Wingman, asked UEXC for a Cutlass Black route from Area 18, observed `uex_get_vehicle_information` and `uex_get_trade_routes`, saw the route image and link in UEXC chat, and opened the image at `http://127.0.0.1:49111/uex-route-card/<id>` in Chrome. The displayed card was 1280x960. No test suite was run; `py_compile`, UEX skill import, Core startup, and `git diff --check` succeeded.
 - **Exact next action:** wait for Kevin's direction before starting the next feature. Do not merge.
 
+## Live microphone check (17 Nov 2026)
+- Kevin reported Computer, ATC and UEXC were not responding. The local Core status endpoint showed hands-free voice activation enabled, microphone armed and unmuted, but soft standby was on.
+- Turned off soft standby through the field-scoped `/voice-activation/standby` API. A follow-up `/voice-activation/status` returned `state: armed`, `listening: true`, `muted: false`, `voice_activation_enabled: true`, `standby: false`.
+- No spoken reply has been verified after this change.
+- **Exact next action:** Kevin tests a spoken request to Computer, ATC and UEXC. If there is still no pickup, inspect the client connection and selected microphone before changing standby again.
+
 
 Updated: 2026-11-17 (Europe/London). This is the `feature/voice-activation-enable` worktree at `C:\Users\admin\github\wingman-ai-voice-activation`, based on `fix/gpt-6-reasoning-none` commit `b77aa7b2bad373370f6e2389b0cff5ce97151765`. The sound selector and conversation style change are in Core commit `ba729630`; Hub selector is in `8001d97`.
 
