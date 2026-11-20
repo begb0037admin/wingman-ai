@@ -12,6 +12,7 @@ import pygame
 from google.genai import types
 from fastapi import APIRouter, Body, File, Form, HTTPException, Request, UploadFile
 import requests
+import httpx
 import sounddevice as sd
 from showinfm import show_in_file_manager
 import keyboard.keyboard as keyboard
@@ -91,6 +92,7 @@ from api.interface import (
 )
 from providers.elevenlabs import ElevenLabs
 from providers.parakeet import Parakeet
+from providers.faster_whisper import FasterWhisper
 from providers.google import GoogleGenAI
 from providers.llama_cpp_provider import LlamaCppProvider
 from providers.llama_cpp_remote import LlamaCppRemote
@@ -1036,11 +1038,13 @@ class WingmanCore(WebSocketUser):
         self.parakeet = Parakeet(
             settings=self.settings_service.settings.stt.parakeet,
         )
+        self.faster_whisper = FasterWhisper()
         # Push-to-talk and voice activation both transcribe through this one.
         self.stt_service = SttService(
             settings_service=self.settings_service,
             secret_keeper=self.secret_keeper,
             parakeet=self.parakeet,
+            faster_whisper=self.faster_whisper,
             get_hotwords=self._stt_hotwords,
             app_root_path=app_root_path,
         )
@@ -1063,6 +1067,7 @@ class WingmanCore(WebSocketUser):
             system_manager=self.system_manager,
             model_downloader=self.model_downloader,
             parakeet=self.parakeet,
+            faster_whisper=self.faster_whisper,
             app_root_path=app_root_path,
         )
 
@@ -1098,6 +1103,7 @@ class WingmanCore(WebSocketUser):
             audio_player=self.audio_player,
             xvasynth=self.xvasynth,
             pocket_tts=self.pocket_tts,
+            secret_keeper=self.secret_keeper,
         )
 
         self.model_metadata_service = get_model_metadata_service()
@@ -2414,11 +2420,19 @@ class WingmanCore(WebSocketUser):
                 )
             if playing:
                 self._run_on_main_loop(self.stop_playback())
+            computer = self.tower.get_wingman_by_name("Computer")
+            acknowledgement = "Standing by."
             self.printr.print(
-                "Voice standby enabled; waiting for Computer.",
-                server_only=True,
+                acknowledgement,
+                source=LogSource.SYSTEM,
+                source_name="Voice control",
+                wingman_name=getattr(computer, "name", None),
                 color=LogType.INFO,
             )
+            if computer is not None:
+                self._run_on_main_loop(
+                    computer.play_to_user(acknowledgement, no_interrupt=True)
+                )
             self._emit_voice_state()
             return
         if passive_voice and va.standby:
@@ -2588,6 +2602,18 @@ class WingmanCore(WebSocketUser):
     def _is_standby_command(words: list[str]) -> bool:
         """Only explicit whole-utterance commands enter standby."""
         return tuple(words) in {
+            ("standby",),
+            ("stand", "by"),
+            ("okay", "standby"),
+            ("okay", "stand", "by"),
+            ("please", "standby"),
+            ("please", "stand", "by"),
+            ("computer", "standby"),
+            ("computer", "stand", "by"),
+            ("okay", "computer", "standby"),
+            ("okay", "computer", "stand", "by"),
+            ("please", "computer", "standby"),
+            ("please", "computer", "stand", "by"),
             ("stand", "down"),
             ("okay", "stand", "down"),
             ("please", "stand", "down"),
@@ -4854,16 +4880,17 @@ class WingmanCore(WebSocketUser):
         # Try endpoints in order: /health, /audio/speech (GET → 405 still proves liveness), root
         probe_paths = ["/health", "/audio/speech", ""]
         try:
-            for path in probe_paths:
-                try:
-                    response = requests.get(url=f"{url}{path}", timeout=10)
-                    # 2xx or 405 (method not allowed) both prove the server is alive
-                    if response.ok or response.status_code == 405:
-                        return TestConnectionResult(
-                            success=True, provider="openai_compatible_tts"
-                        )
-                except requests.ConnectionError:
-                    continue
+            async with httpx.AsyncClient(timeout=10) as client:
+                for path in probe_paths:
+                    try:
+                        response = await client.get(f"{url}{path}")
+                        # 2xx or 405 (method not allowed) both prove liveness.
+                        if response.is_success or response.status_code == 405:
+                            return TestConnectionResult(
+                                success=True, provider="openai_compatible_tts"
+                            )
+                    except httpx.RequestError:
+                        continue
             return TestConnectionResult(
                 success=False,
                 provider="openai_compatible_tts",

@@ -601,6 +601,7 @@ TTS_SECTIONS = (
     "pocket_tts",
     "xvasynth",
     "openai_compatible_tts",
+    "deepgram_tts",
     "sound",
 )
 TTS_KEYS = {"features": ("tts_provider",), "wingman_pro": ("tts_provider", "azure")}

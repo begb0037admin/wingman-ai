@@ -72,8 +72,8 @@ from services.command_executor import CommandExecutor
 from services.tool_executor import ToolExecutor
 from services.uex_handoff import (
     UEX_HANDOFF_COMPLETED,
-    UEX_HANDOFF_TOOL,
     UEX_HANDOFF_TOOL_NAME,
+    build_uex_handoff_request,
     is_uex_request,
 )
 from services.provider_factory import ProviderFactory
@@ -702,6 +702,17 @@ class Wingman:
         self.ensure_memory_initialized()
         self.metrics.start_turn_usage()
 
+        # A bare wake word selects Computer but is not a conversational turn.
+        # Keep it out of the model and conversation history so prior UEX context
+        # cannot trigger a transfer or an unrelated model response.
+        if self.name.casefold() == "computer" and re.fullmatch(
+            r"\s*computer[\s,.:;!?-]*", transcript or "", flags=re.IGNORECASE
+        ):
+            await self.add_user_message(transcript, images=images)
+            acknowledgement = "Yes?"
+            await self.conversation.add_assistant_message(acknowledgement)
+            return acknowledgement, acknowledgement, None, True
+
         await self.add_user_message(transcript, images=images)
 
         benchmark.start_snapshot("Instant activation commands")
@@ -716,9 +727,9 @@ class Wingman:
             return instant_response, instant_response, None, True
         benchmark.finish_snapshot()
 
-        # Star Citizen UEX and trade-market requests are a deterministic
-        # department handoff: do not spend a Computer model turn deciding
-        # whether its specialist should handle them.
+        # Star Citizen economy lookups and explicit UEX transfer requests are
+        # deterministic department handoffs: Computer must not choose a
+        # purchase-only StarHead tool for rentals or stale price data.
         if self.name.casefold() == "computer" and is_uex_request(transcript):
             success, handoff_message = await self._transfer_request_to_uex(transcript)
             if success:
@@ -1524,12 +1535,6 @@ class Wingman:
         for _, tool in self.mcp_registry.get_active_tools():
             tools.append(tool)
 
-        # UEXCorp has one shared owner because its data, active route and HUD
-        # are process-wide. Offer Computer a relay tool only when the dedicated
-        # UEXC Wingman is present and owns UEXCorp.
-        if self.name.casefold() == "computer" and self._uex_handoff_target():
-            tools.append(UEX_HANDOFF_TOOL)
-
         if self.persistent_memory_service:
             tools.extend(self.persistent_memory_service.get_tool_definitions())
 
@@ -1567,6 +1572,8 @@ class Wingman:
         ).strip()
         if not forwarded:
             return False, "There is no request to forward to UEX."
+        if not is_uex_request(forwarded):
+            return False, "That is not a UEX trade or market request; no handoff was made."
         if not self.tower.set_voice_handoff_target(target.name):
             return False, "UEX is no longer available; no handoff was made."
 
@@ -1591,7 +1598,14 @@ class Wingman:
         # The source turn must finish after the spoken announcement, rather
         # than displaying a perpetual loading state while UEXC works. Retain
         # the task until the specialist finishes answering in its own channel.
-        task = asyncio.create_task(target.process(transcript=forwarded))
+        memory_service = getattr(self, "persistent_memory_service", None)
+        memory_facts = memory_service.prompt_facts() if memory_service else ()
+        forwarded_with_context = build_uex_handoff_request(
+            forwarded,
+            recent_messages=getattr(self.conversation, "messages", ()),
+            persistent_facts=memory_facts,
+        )
+        task = asyncio.create_task(target.process(transcript=forwarded_with_context))
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
         return True, "The request was forwarded to UEX."

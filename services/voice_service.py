@@ -1,10 +1,14 @@
 import asyncio
+import ipaddress
 from concurrent.futures import ThreadPoolExecutor
-from fastapi import APIRouter
-from api.enums import TtsProvider
+from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
+import httpx
+from api.enums import LogType, TtsProvider
 from api.interface import (
     AzureTtsConfig,
     EdgeTtsConfig,
+    DeepgramTtsConfig,
     ElevenlabsConfig,
     HumeConfig,
     InworldConfig,
@@ -14,6 +18,7 @@ from api.interface import (
     PocketTTSConfig,
 )
 from providers.edge import Edge, get_edge_voices
+from providers.deepgram import DeepgramTts
 from providers.elevenlabs import ElevenLabs
 from providers.hume import Hume
 from providers.inworld import Inworld
@@ -26,6 +31,7 @@ from services.audio_player import AudioPlayer
 from services import speech_text
 from services.config_manager import ConfigManager
 from services.printr import Printr
+from services.secret_keeper import SecretKeeper
 from services.spoken_language import elevenlabs_language, inworld_language
 
 
@@ -36,12 +42,14 @@ class VoiceService:
         audio_player: AudioPlayer,
         xvasynth: XVASynth,
         pocket_tts: PocketTTS,
+        secret_keeper: SecretKeeper,
     ):
         self.printr = Printr()
         self.config_manager = config_manager
         self.audio_player = audio_player
         self.xvasynth = xvasynth
         self.pocket_tts = pocket_tts
+        self.secret_keeper = secret_keeper
         self.edge_voices: list[VoiceInfo] = []
 
         self.router = APIRouter()
@@ -71,6 +79,13 @@ class VoiceService:
             methods=["GET"],
             path="/voices/edge",
             endpoint=self.get_edge_voices,
+            response_model=list[VoiceInfo],
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["GET"],
+            path="/voices/deepgram",
+            endpoint=self.get_deepgram_voices,
             response_model=list[VoiceInfo],
             tags=tags,
         )
@@ -114,6 +129,24 @@ class VoiceService:
             methods=["POST"],
             path="/voices/preview/openai",
             endpoint=self.play_openai_tts,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
+            path="/voices/preview/deepgram",
+            endpoint=self.play_deepgram_tts,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["GET"],
+            path="/deepgram-openai/v1/voices",
+            endpoint=self.get_deepgram_compatible_voices,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
+            path="/deepgram-openai/v1/audio/speech",
+            endpoint=self.synthesize_deepgram_compatible,
             tags=tags,
         )
         self.router.add_api_route(
@@ -206,6 +239,177 @@ class VoiceService:
                 self.printr.toast_error(f"Edge TTS: \n{str(e)}")
         return self.edge_voices
 
+    # GET /voices/deepgram
+    async def get_deepgram_voices(self) -> list[VoiceInfo]:
+        return DeepgramTts.get_available_voices()
+
+    # GET /deepgram-openai/v1/voices
+    async def get_deepgram_compatible_voices(self, request: Request) -> dict:
+        self._require_loopback(request)
+        return {
+            "data": [
+                {"id": voice.id, "name": voice.name}
+                for voice in DeepgramTts.get_available_voices()
+            ]
+        }
+
+    # POST /deepgram-openai/v1/audio/speech
+    async def synthesize_deepgram_compatible(
+        self, request: Request, payload: dict
+    ) -> Response:
+        """Translate an OpenAI-compatible TTS request into Deepgram Aura or Flux."""
+        self._require_loopback(request)
+
+        text = payload.get("input")
+        if not isinstance(text, str) or not text.strip():
+            raise HTTPException(status_code=400, detail="A non-empty input is required.")
+
+        allowed_voices = {voice.id for voice in DeepgramTts.get_available_voices()}
+        voice = payload.get("voice")
+        model = payload.get("model")
+        deepgram_model = (
+            voice if isinstance(voice, str) and voice in allowed_voices
+            else model if isinstance(model, str) and model in allowed_voices
+            else None
+        )
+        if not deepgram_model:
+            raise HTTPException(
+                status_code=400,
+                detail="Select a Deepgram Aura-2 or Flux voice in Wingman TTS settings.",
+            )
+
+        api_key = self.secret_keeper.secrets.get("deepgram", "")
+        if not api_key:
+            try:
+                api_key = await self.secret_keeper.retrieve(
+                    requester="Deepgram TTS", key="deepgram"
+                )
+            except ValueError:
+                api_key = ""
+        if not api_key:
+            raise HTTPException(
+                status_code=401,
+                detail="Enter the Deepgram API key in Wingman's key prompt, then retry.",
+            )
+
+        response_format = payload.get("response_format", "mp3")
+        if response_format == "pcm":
+            params: dict[str, str | int | float] = {
+                "model": deepgram_model,
+                "encoding": "linear16",
+                "sample_rate": 24000,
+                "container": "none",
+            }
+        elif response_format == "wav":
+            params = {
+                "model": deepgram_model,
+                "encoding": "linear16",
+                "sample_rate": 24000,
+                "container": "wav",
+            }
+        elif response_format in ("mp3", None):
+            params = {"model": deepgram_model, "encoding": "mp3"}
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Deepgram Aura and Flux support mp3, wav, or pcm output here.",
+            )
+
+        speed = payload.get("speed")
+        if isinstance(speed, (int, float)) and not isinstance(speed, bool):
+            if not 0.5 <= speed <= 1.5:
+                raise HTTPException(
+                    status_code=400, detail="Deepgram speed must be between 0.5 and 1.5."
+                )
+            params["speed"] = speed
+
+        deepgram_tts = DeepgramTts(api_key=api_key, config=None)
+        if deepgram_model.startswith("flux-") and response_format == "pcm":
+            audio_stream = deepgram_tts.stream_flux_audio(
+                text=text,
+                config=DeepgramTtsConfig(model=deepgram_model),
+                params=params,
+            )
+            try:
+                first_chunk = await anext(audio_stream)
+            except StopAsyncIteration as exc:
+                await audio_stream.aclose()
+                raise HTTPException(
+                    status_code=502,
+                    detail="Deepgram Flux returned no audio for this text.",
+                ) from exc
+            except Exception as exc:
+                await audio_stream.aclose()
+                self.printr.print(
+                    f"Deepgram Flux streaming TTS failed ({type(exc).__name__}).",
+                    server_only=True,
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail="Deepgram could not stream this Flux voice.",
+                ) from exc
+
+            async def audio_chunks():
+                try:
+                    yield first_chunk
+                    async for chunk in audio_stream:
+                        yield chunk
+                except Exception as exc:
+                    self.printr.print(
+                        f"Deepgram Flux audio stream ended early ({type(exc).__name__}).",
+                        server_only=True,
+                    )
+                    raise
+                finally:
+                    await audio_stream.aclose()
+
+            return StreamingResponse(
+                audio_chunks(),
+                media_type="audio/pcm",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
+        try:
+            audio = await deepgram_tts.request_audio(
+                text=text,
+                config=DeepgramTtsConfig(model=deepgram_model),
+                params=params,
+            )
+        except httpx.HTTPStatusError as exc:
+            self.printr.print(
+                f"Deepgram compatible TTS returned HTTP {exc.response.status_code}.",
+                server_only=True,
+            )
+            raise HTTPException(
+                status_code=502, detail="Deepgram could not synthesize this text."
+            ) from exc
+        except httpx.RequestError as exc:
+            self.printr.print(
+                f"Deepgram compatible TTS request failed: {exc}", server_only=True
+            )
+            raise HTTPException(
+                status_code=502, detail="Could not reach the Deepgram TTS API."
+            ) from exc
+
+        content_type = (
+            "audio/pcm" if response_format == "pcm"
+            else audio.headers.get("content-type", "audio/mpeg").split(";")[0]
+        )
+        return Response(content=audio.content, media_type=content_type)
+
+    @staticmethod
+    def _require_loopback(request: Request) -> None:
+        host = request.client.host if request.client else ""
+        try:
+            is_loopback = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            is_loopback = False
+        if not is_loopback:
+            raise HTTPException(status_code=403, detail="This endpoint is local-only.")
+
     # GET /voices/openai-compatible
     async def get_openai_compatible_voices(
         self,
@@ -296,6 +500,26 @@ class VoiceService:
                 audio_player=self.audio_player,
                 wingman_name="system",
                 stream=stream,
+            )
+        )
+
+    # POST /voices/preview/deepgram
+    async def play_deepgram_tts(
+        self,
+        text: str,
+        api_key: str,
+        config: DeepgramTtsConfig,
+        sound_config: SoundConfig,
+        as_written: bool = False,
+    ):
+        deepgram = DeepgramTts(api_key=api_key, config=None)
+        await self._run_playback(
+            deepgram.preview(
+                text=self._spoken(text, TtsProvider.DEEPGRAM, as_written),
+                config=config,
+                sound_config=sound_config,
+                audio_player=self.audio_player,
+                wingman_name="system",
             )
         )
 

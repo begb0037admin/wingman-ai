@@ -30,8 +30,9 @@ global_ptt_bindings:
         scan_code: null
         extended: false
 stt:
-  # Which provider transcribes what you say: parakeet (on this machine, or
-  # on a server of yours) or wingman_pro (the subscription's cloud service).
+  # Which provider transcribes what you say: parakeet (on this machine or a
+  # server of yours), faster_whisper (local English large-v3-turbo), or
+  # wingman_pro (the subscription's cloud service).
   # One choice for every wingman and for both ways of talking.
   provider: parakeet
   # Special words no speech model knows; every transcript is corrected

@@ -7,6 +7,7 @@ from api.enums import LogType, SttProvider
 from api.interface import ParakeetSttConfig
 from providers import parakeet_r2
 from providers.parakeet import Parakeet
+from providers.faster_whisper import FasterWhisper
 from services.model_downloader import ModelDownloader
 from services.printr import Printr
 from services.system_manager import SystemManager
@@ -22,11 +23,13 @@ class SttProviderManager:
         model_downloader: ModelDownloader,
         parakeet: Parakeet,
         app_root_path: str,
+        faster_whisper: Optional[FasterWhisper] = None,
     ):
         self.settings_service = settings_service
         self.system_manager = system_manager
         self.model_downloader = model_downloader
         self.parakeet = parakeet
+        self.faster_whisper = faster_whisper or FasterWhisper()
         self.app_root_path = app_root_path
         self.printr = Printr()
         self.active_provider: SttProvider | None = None
@@ -51,6 +54,8 @@ class SttProviderManager:
             # Check if this is a local provider that needs download + init
             if provider == SttProvider.PARAKEET and stt_settings.parakeet.run_locally:
                 await self._initialize_parakeet(on_status)
+            elif provider == SttProvider.FASTER_WHISPER:
+                await self._initialize_faster_whisper(on_status)
             else:
                 # Remote/cloud provider — nothing to download or init
                 self.printr.print(
@@ -120,6 +125,22 @@ class SttProviderManager:
         if await self._health_check_parakeet():
             await asyncio.to_thread(self._remove_old_parakeet)
 
+    async def _initialize_faster_whisper(
+        self,
+        on_status: Optional[Callable[[str, float | None], Awaitable[None]]] = None,
+    ):
+        if on_status:
+            await on_status(
+                "Loading local Faster-Whisper (first load downloads large-v3-turbo)...", None
+            )
+        try:
+            await asyncio.to_thread(self.faster_whisper.load)
+        except Exception as exc:
+            self.printr.toast_error(
+                "Could not load local Faster-Whisper. Check the model download and CUDA setup. "
+                f"Error: {exc}"
+            )
+
     async def switch_provider(
         self,
         new_provider: SttProvider,
@@ -137,11 +158,15 @@ class SttProviderManager:
             # Unload current provider
             if old_provider == SttProvider.PARAKEET:
                 self.parakeet.unload()
+            elif old_provider == SttProvider.FASTER_WHISPER:
+                self.faster_whisper.unload()
 
             # Initialize new provider
             stt_settings = self.settings_service.settings.stt
             if new_provider == SttProvider.PARAKEET and stt_settings.parakeet.run_locally:
                 await self._initialize_parakeet(on_status)
+            elif new_provider == SttProvider.FASTER_WHISPER:
+                await self._initialize_faster_whisper(on_status)
 
             self.active_provider = new_provider
 
@@ -190,4 +215,5 @@ class SttProviderManager:
     def unload_all(self):
         """Unload the local model. Called on shutdown."""
         self.parakeet.unload()
+        self.faster_whisper.unload()
         self.active_provider = None

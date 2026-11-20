@@ -208,7 +208,8 @@ class ContextBuilder:
         # Give the model accurate help text when the user asks about them.
         context += (
             "\n\n# VOICE CONTROLS\n"
-            "The app has a spoken standby command: 'stand down' (also 'Okay, stand down'). "
+            "The app has a spoken sleep command: 'standby' (also 'stand by' or 'stand down'; "
+            "'Okay, standby' and 'Please, standby' are accepted too). "
             "Core intercepts it before you receive the transcript, stops any reply, "
             "and enters soft standby. The microphone and local wake detection remain on, "
             "but ordinary passive speech is ignored and you do not respond. Only the name "

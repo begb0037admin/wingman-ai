@@ -138,6 +138,7 @@ class SoundEffect(Enum):
 
 class TtsProvider(Enum):
     OPENAI = "openai"
+    DEEPGRAM = "deepgram"
     ELEVENLABS = "elevenlabs"
     EDGE_TTS = "edge_tts"
     XVASYNTH = "xvasynth"
@@ -149,10 +150,10 @@ class TtsProvider(Enum):
 
 
 class SttProvider(Enum):
-    """Parakeet on this machine or on a server of the user's; the
-    subscription's cloud transcription otherwise."""
+    """Parakeet (local or remote), local Faster-Whisper, or subscription STT."""
 
     PARAKEET = "parakeet"
+    FASTER_WHISPER = "faster_whisper"
     WINGMAN_PRO = "wingman_pro"
 
 

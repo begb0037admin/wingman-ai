@@ -296,6 +296,16 @@ datas += onnx_asr_datas
 binaries += onnx_asr_binaries
 hiddenimports += onnx_asr_hidden
 
+# Faster-Whisper / CTranslate2 backend used by the selectable local STT provider.
+fw_datas, fw_binaries, fw_hidden = collect_all('faster_whisper')
+datas += fw_datas
+binaries += fw_binaries
+hiddenimports += fw_hidden
+ct2_datas, ct2_binaries, ct2_hidden = collect_all('ctranslate2')
+datas += ct2_datas
+binaries += ct2_binaries
+hiddenimports += ct2_hidden
+
 # dxcam (Vision AI's "Use DXCam capture", Windows only). Core imports it only
 # when the user switches it on, and dxcam loads its Cython kernel and its
 # backends through importlib, so name all of it. Missing, the capture falls

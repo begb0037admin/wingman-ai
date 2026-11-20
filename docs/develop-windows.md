@@ -37,11 +37,11 @@ pip install -r requirements.txt     # install dependencies
 
 ### NVIDIA GPU acceleration
 
-GPU speech recognition (Parakeet) needs no extra step: `requirements.txt` installs `onnxruntime-gpu` and the CUDA 13 packages. It needs an NVIDIA GPU from the GTX 16xx / RTX 20xx series or newer and driver 580 or newer. torch is only used for Pocket TTS, which runs on the CPU.
+GPU speech recognition (Parakeet) needs no extra step: `requirements.txt` installs `onnxruntime-gpu` and the CUDA 13 packages. It needs an NVIDIA GPU from the GTX 16xx / RTX 20xx series or newer and driver 580 or newer. Faster-Whisper uses CTranslate2 with CUDA/FP16 when available and falls back to CPU/int8 if its CUDA runtime cannot initialize. torch is only used for Pocket TTS, which runs on the CPU.
 
 ## Models
 
-Models (Parakeet, Pocket TTS, Silero VAD and others) are downloaded by Core on first use into the `models/` folder of the Wingman user data directory (`%APPDATA%\ShipBit\WingmanAI\models` on Windows). If you already have a Wingman AI installation, the dev environment uses the same folder, so there is nothing to copy.
+Models (Parakeet, Pocket TTS, Silero VAD and others) are downloaded by Core on first use into the `models/` folder of the Wingman user data directory (`%APPDATA%\ShipBit\WingmanAI\models` on Windows). Faster-Whisper uses Hugging Face's shared model cache instead. Its first load downloads `large-v3-turbo`; later Core runs reuse that cache. If you already have a Wingman AI installation, the dev environment uses the same Core model folder, so there is nothing to copy for those models.
 
 ## Setup Visual Studio Code
 

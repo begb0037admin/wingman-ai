@@ -109,6 +109,9 @@ openai_compatible_tts:
     - "I found the data you were looking for [chuckle] but you might not like what it says."
     - "[gasp] Wait, WHAT? [laugh] Are you kidding me right now?"
     - "Look, [groan] I've told you three times already. [sigh] Let me explain it one more time."
+deepgram_tts:
+  model: aura-2-thalia-en
+  endpoint: https://api.eu.deepgram.com
 mistral:
   conversation_model: mistral-medium-latest
   endpoint: https://api.mistral.ai/v1

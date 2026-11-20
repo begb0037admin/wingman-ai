@@ -38,6 +38,7 @@ import providers.open_ai  # noqa: F401
 import providers.google  # noqa: F401
 import providers.x_ai  # noqa: F401
 import providers.elevenlabs  # noqa: F401
+import providers.deepgram  # noqa: F401
 import providers.edge  # noqa: F401
 import providers.hume  # noqa: F401
 import providers.inworld  # noqa: F401
@@ -112,6 +113,13 @@ class ProviderFactory:
             from providers.edge import EdgeTts
 
             return EdgeTts(config=self._config)
+        elif tts_enum == TtsProvider.DEEPGRAM:
+            api_key = await self._retrieve_secret("deepgram", errors)
+            if not api_key:
+                return None
+            from providers.deepgram import DeepgramTts
+
+            return DeepgramTts(api_key=api_key, config=self._config)
         elif tts_enum == TtsProvider.ELEVENLABS:
             api_key = await self._retrieve_secret("elevenlabs", errors)
             if not api_key:

@@ -29,6 +29,7 @@ sounddevice==0.5.5
 soundfile==0.13.1
 typing_extensions==4.15.0
 uvicorn==0.40.0
+websockets==16.1.1
 
 # setuptools vendored dependencies - required for PyInstaller bundling
 jaraco-context>=6.0.0
@@ -69,6 +70,7 @@ protobuf>=5.29,<7
 
 # Parakeet STT (NVIDIA Parakeet TDT via ONNX Runtime)
 onnx-asr>=0.3.3
+faster-whisper==1.2.1
 # Built against CUDA 13 since 1.27, see the NVIDIA packages above. At least
 # 1.30 (tested): 1.27 is a CUDA 13 build whose preload_dlls() still looks in the
 # CUDA 12 folders and misses nvidia/cu13, so Parakeet would stay on the CPU.

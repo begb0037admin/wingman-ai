@@ -440,6 +440,15 @@ class OpenAiCompatibleTtsConfig(BaseModel):
     voices_endpoint: Optional[str] = None
 
 
+class DeepgramTtsConfig(BaseModel):
+    """Deepgram Aura TTS settings."""
+
+    model: str = "aura-2-thalia-en"
+    """Aura voice/model id, e.g. ``aura-2-thalia-en``."""
+    endpoint: str = "https://api.eu.deepgram.com"
+    """Deepgram API base URL; the EU endpoint is the default for UK users."""
+
+
 class XVASynthVoiceConfig(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
     model_directory: str
@@ -1451,6 +1460,7 @@ class NestedConfig(BaseModel):
     local_llm: LocalLlmConfig
     edge_tts: EdgeTtsConfig
     openai_compatible_tts: OpenAiCompatibleTtsConfig
+    deepgram_tts: DeepgramTtsConfig = Field(default_factory=DeepgramTtsConfig)
     elevenlabs: ElevenlabsConfig
     hume: HumeConfig
     inworld: InworldConfig

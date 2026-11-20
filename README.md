@@ -123,10 +123,10 @@ Every subscription plan, Free included, gets our hosted servers:
 Speech-to-text, the AI model and text-to-speech are three separate steps. Take the Wingman Subscription for all of them, pick a provider for each, or run all three on your own computer.
 
 - **AI models**: OpenAI, Google (Gemini), Mistral, Groq, OpenRouter, Cerebras, Perplexity, xAI (Grok), any OpenAI-compatible local LLM (llama.cpp, Ollama, LM Studio), and the Wingman Subscription
-- **Speech-to-text**: Parakeet (local, the default, on the GPU with NVIDIA CUDA), Parakeet on your own server, and the Wingman Subscription
+- **Speech-to-text**: Parakeet (local or on your own server), Faster-Whisper (local `large-v3-turbo`, English, with vocabulary hints and optional local Ollama cleanup), and the Wingman Subscription
 - **Text-to-speech**:
   - Pocket TTS (local and free, runs on the CPU, clones a voice from a few seconds of audio, with ready-made voices from native speakers: 49 German, 21 English, 20 French, 15 Spanish, 20 Italian, 20 Portuguese and 20 Dutch)
-  - Edge TTS (free), OpenAI, ElevenLabs, Hume, Inworld
+  - Edge TTS (free), OpenAI, ElevenLabs, Hume, Inworld, and Deepgram Aura-2
   - Azure and Inworld through the Wingman Subscription
   - any OpenAI-compatible server, e.g. a remote Pocket TTS or XVASynth
 - **Image generation**: OpenAI and the Wingman Subscription
@@ -196,6 +196,17 @@ Inworld has high-quality voices with **audio markups for emotions** (anger, joy,
 
 Similar to ElevenLabs and Inworld, a bit less polished and quite affordable.
 
+### Deepgram Aura-2 and Flux
+
+Deepgram Aura-2 and Flux voices are available through Core's loopback-only OpenAI-compatible TTS adapter. Core uses its EU API endpoint by default and asks for the `deepgram` API key through Wingman's normal secret prompt. The installed desktop client's provider picker does not yet have a native Deepgram card, so configure its **OpenAI-compatible TTS** option with:
+
+- Base URL: `http://127.0.0.1:49111/deepgram-openai/v1`
+- Voices endpoint: `/voices`
+- Model and voice: select the same listed ID, such as `flux-colin-en` or `aura-2-thalia-en`
+- API-key field: a local placeholder such as `deepgram-local`
+
+Enable **Output Streaming** to use Flux's `/v2/speak` WebSocket and start playback as PCM audio frames arrive. Aura-2 uses the batch REST endpoint. The adapter refuses non-loopback clients.
+
 ### Edge TTS
 
 Microsoft Edge TTS is free and needs no API key, but its voices sound less natural than the others. Each voice speaks only one language. When you switch the language, Wingman picks a matching voice for you.
@@ -217,7 +228,7 @@ You install Wingman AI once. The client updates itself and Core when a new versi
 ### Windows
 
 - Download the installer of the latest version from [wingman-ai.com](https://www.wingman-ai.com).
-- **CUDA is bundled.** With an NVIDIA GPU from the GTX 16xx / RTX 20xx series or newer and driver 580 or newer, local speech recognition (Parakeet) runs on the GPU without extra installation steps. Older GPUs and drivers use the CPU.
+- **CUDA is bundled.** With an NVIDIA GPU from the GTX 16xx / RTX 20xx series or newer and driver 580 or newer, local Parakeet runs on the GPU. Faster-Whisper also tries CUDA/FP16 and falls back to CPU/int8 if CTranslate2 cannot initialize CUDA. Older GPUs and drivers use the CPU.
 - Install it to a directory of your choice and start the client `Wingman AI.exe`.
   - The client will auto-start `Wingman AI Core.exe` in the background
 

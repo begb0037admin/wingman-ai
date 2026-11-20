@@ -11,7 +11,11 @@ callers already run on a worker thread.
 """
 
 import traceback
+import json
+import re
 from typing import TYPE_CHECKING, Callable, Optional
+from urllib.request import Request, urlopen
+from urllib.error import URLError
 
 from api.enums import LogType, SttProvider
 from services.audio.vocabulary import Vocabulary, apply_override, load_preset
@@ -22,6 +26,7 @@ from services.spoken_language import transcription_tag
 
 if TYPE_CHECKING:
     from providers.parakeet import Parakeet
+    from providers.faster_whisper import FasterWhisper
     from services.secret_keeper import SecretKeeper
     from services.settings_service import SettingsService
 
@@ -32,6 +37,7 @@ class SttService:
         settings_service: "SettingsService",
         secret_keeper: "SecretKeeper",
         parakeet: "Parakeet",
+        faster_whisper: Optional["FasterWhisper"] = None,
         get_hotwords: Optional[Callable[[], list[str]]] = None,
         app_root_path: str = ".",
     ):
@@ -39,6 +45,10 @@ class SttService:
         self.app_root_path = app_root_path
         self.secret_keeper = secret_keeper
         self.parakeet = parakeet
+        if faster_whisper is None:
+            from providers.faster_whisper import FasterWhisper
+            faster_whisper = FasterWhisper()
+        self.faster_whisper = faster_whisper
         # Names the decoder should recognise, read fresh on every call so a
         # config switch (other wingmen, other names) is picked up without a
         # restart. WingmanCore hands in the names of the active wingmen.
@@ -81,6 +91,80 @@ class SttService:
         if corrected != text:
             self.printr.print(
                 f"Vocabulary: '{text}' -> '{corrected}'", server_only=True, color=LogType.INFO
+            )
+        if provider == SttProvider.FASTER_WHISPER:
+            return self._cleanup_transcript(text, corrected)
+        return corrected
+
+    @staticmethod
+    def _cleanup_is_plausible(raw: str, cleaned: str) -> bool:
+        """Reject Ollama answers or expansions; cleanup may only edit speech."""
+        raw, cleaned = raw.strip(), cleaned.strip()
+        if not cleaned:
+            return False
+        if len(cleaned) > max(len(raw) * 1.5, len(raw) + 30):
+            return False
+        if "\n" not in raw and sum(
+            bool(re.match(r"^(?:[-*•]|\d+[.)])\s+", line.strip()))
+            for line in cleaned.splitlines()
+        ) >= 2:
+            return False
+        words = lambda value: set(re.findall(r"[a-z0-9']+", value.lower()))
+        fillers = {"um", "uh", "like"}
+        original = words(raw) - fillers
+        result = words(cleaned) - fillers
+        if original and len(original & result) / len(original) < 0.6:
+            return False
+        if result and len(result - original) / len(result) > 0.35:
+            return False
+        openers = (
+            "i can", "i can't", "i cannot", "i don't", "i do not", "i'm", "i am",
+            "here's", "here is", "let me", "of course", "absolutely", "sure",
+            "certainly", "the answer", "as an ai", "happy to",
+        )
+        lower_raw, lower_cleaned = raw.lower().lstrip(), cleaned.lower().lstrip()
+        if not any(lower_raw.startswith(opener) for opener in openers) and any(
+            lower_cleaned.startswith(opener) for opener in openers
+        ):
+            return False
+        return True
+
+    def _cleanup_transcript(self, raw: str, corrected: str) -> str:
+        """Use only the local Ollama endpoint; failures retain corrected speech."""
+        payload = json.dumps({
+            "model": "llama3.2:3b",
+            "system": (
+                "You edit speech transcripts; you are not a conversational assistant. "
+                "Remove filler words and false starts, and fix punctuation and grammar. "
+                "Preserve meaning and wording. Never answer questions or add content. "
+                "Return only the edited transcript."
+            ),
+            "prompt": f"<transcript>\n{corrected}\n</transcript>",
+            "stream": False,
+            "keep_alive": "30m",
+            "options": {"temperature": 0, "num_predict": 512},
+        }).encode("utf-8")
+        request = Request(
+            "http://127.0.0.1:11434/api/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=60) as response:
+                candidate = str(json.loads(response.read()).get("response", "")).strip()
+            if self._cleanup_is_plausible(corrected, candidate):
+                return candidate
+            self.printr.print(
+                "Ignored implausible local STT cleanup; keeping raw transcript.",
+                server_only=True,
+                color=LogType.WARNING,
+            )
+        except (URLError, TimeoutError, OSError, ValueError, TypeError) as exc:
+            self.printr.print(
+                f"Local STT cleanup unavailable; keeping raw transcript: {exc}",
+                server_only=True,
+                color=LogType.WARNING,
             )
         return corrected
 
@@ -151,6 +235,11 @@ class SttService:
                 api_key=self._parakeet_api_key(),
             )
             return result.text if result else None
+
+        if provider == SttProvider.FASTER_WHISPER:
+            # Decoder hints use the same live vocabulary as deterministic correction.
+            hints = ", ".join(self.vocabulary().entries)
+            return self.faster_whisper.transcribe(filename, initial_prompt=hints)
 
         if provider == SttProvider.WINGMAN_PRO:
             from providers.wingman_subscription import WingmanSubscription

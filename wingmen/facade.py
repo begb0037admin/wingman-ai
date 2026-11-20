@@ -245,6 +245,9 @@ def apply_voice_to_current_provider(config: Any, voice: Any) -> tuple[Any, str] 
     if provider == TtsProvider.OPENAI:
         config.openai.tts_voice = voice
         return getattr(voice, "value", voice), "OpenAI"
+    if provider == TtsProvider.DEEPGRAM:
+        config.deepgram_tts.model = getattr(voice, "id", voice)
+        return config.deepgram_tts.model, "Deepgram Aura"
     if provider == TtsProvider.ELEVENLABS:
         config.elevenlabs.voice = voice
         config.elevenlabs.output_streaming = False
@@ -975,6 +978,7 @@ class SkillTts:
                 else config.inworld.voice_id
             ),
             TtsProvider.OPENAI: lambda: config.openai.tts_voice,
+            TtsProvider.DEEPGRAM: lambda: config.deepgram_tts.model,
             TtsProvider.ELEVENLABS: lambda: config.elevenlabs.voice,
             TtsProvider.EDGE_TTS: lambda: config.edge_tts.voice,
             TtsProvider.XVASYNTH: lambda: config.xvasynth.voice,

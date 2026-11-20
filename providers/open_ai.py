@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+import asyncio
 import json
 import re
 from typing import TYPE_CHECKING, Literal, Mapping, Union
@@ -403,7 +404,8 @@ class OpenAiCompatibleTts:
         try:
             if not stream:
                 # Non-streaming implementation
-                response = self.client.audio.speech.create(
+                response = await asyncio.to_thread(
+                    self.client.audio.speech.create,
                     input=text,
                     model=model,
                     voice=voice,
@@ -420,7 +422,7 @@ class OpenAiCompatibleTts:
                     )
             else:
                 # Streaming implementation
-                with self.client.audio.speech.with_streaming_response.create(
+                context = self.client.audio.speech.with_streaming_response.create(
                     input=text,
                     model=model,
                     voice=voice,
@@ -428,31 +430,31 @@ class OpenAiCompatibleTts:
                     response_format="pcm",
                     # instructions=instructions,
                     extra_headers=extra_headers,
-                ) as response:
+                )
+                response = await asyncio.to_thread(context.__enter__)
+                try:
                     # Create an iterator for the audio chunks. We can set the chunk size here.
                     audio_stream_iterator = response.iter_bytes(chunk_size=1024)
 
                     # This callback is passed to the audio_player and called repeatedly
                     # to fill its buffer.
-                    def buffer_callback(audio_buffer):
+                    def next_chunk():
+                        try:
+                            return next(audio_stream_iterator)
+                        except StopIteration:
+                            return None
+
+                    async def buffer_callback(audio_buffer):
                         """
                         Fetches the next chunk from the audio stream and loads it
                         into the player's buffer.
                         """
-                        try:
-                            # Get the next chunk of audio data from the iterator
-                            chunk = next(audio_stream_iterator)
-                            chunk_size = len(chunk)
-
-                            # Copy the received audio data into the buffer provided by the audio player
-                            audio_buffer[:chunk_size] = chunk
-
-                            # Return the number of bytes written
-                            return chunk_size
-                        except StopIteration:
-                            # When the iterator is exhausted, it raises StopIteration.
-                            # We catch it and return 0 to signal the end of the stream.
+                        chunk = await asyncio.to_thread(next_chunk)
+                        if chunk is None:
                             return 0
+                        chunk_size = len(chunk)
+                        audio_buffer[:chunk_size] = chunk
+                        return chunk_size
 
                     await audio_player.stream_with_effects(
                         buffer_callback=buffer_callback,
@@ -463,6 +465,8 @@ class OpenAiCompatibleTts:
                         channels=1,
                         use_gain_boost=True,  # All streaming PCM TTS providers need this
                     )
+                finally:
+                    await asyncio.to_thread(context.__exit__, None, None, None)
 
         except APIStatusError as e:
             printr.toast_error(
